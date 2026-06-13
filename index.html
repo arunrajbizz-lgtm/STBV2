@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=1920, height=1080, user-scalable=no" />
+    <title>PoomaniTV</title>
+    <!-- Tizen Web API -->
+    <script type="text/javascript">
+      // Load Tizen webapis.js only on Tizen devices
+      if (navigator.userAgent.indexOf('Tizen') > -1) {
+        document.write('<script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"><\/script>');
+      }
+    </script>
+    
+    <!-- Browser playback engines (HLS.js & mpegts.js fallbacks) -->
+    <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.8/hls.min.js"></script>
+    <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/mpegts.js/1.7.3/mpegts.min.js"></script>
+
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: transparent;
+        color: #fff;
+        overflow: hidden;
+        width: 1920px;
+        height: 1080px;
+      }
+      #root {
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- AVPlay Object for Tizen -->
+    <object id="av-player" type="application/avplayer" style="position: absolute; left: 0; top: 0; width: 100%; height: 100%; z-index: -1;"></object>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

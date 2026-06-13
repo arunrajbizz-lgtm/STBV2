@@ -1,0 +1,68 @@
+node_modules/
+dist/
+build/
+
+# Logs
+*.log
+*.txt
+server_log*
+stability_*
+verification_output_*
+
+# Cache and temporary data
+cache.json
+extracted_step_*.json
+runtime_response.json
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+providers.json
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.tmp
+*.bak
+*.cjs
+
+# Scripts and forensic files
+fix.ps1
+server.cjs
+audit_*.js
+brute_*.js
+cdn_*.js
+check_*.js
+debug_*.js
+deep_*.js
+final_*.js
+forensic_*.js
+get_*.js
+inspect_*.js
+jiotv_*.js
+old_*.js
+playback_*.js
+player_*.js
+post_*.js
+query_*.js
+scratch_*.js
+simulate_*.js
+test_*.js
+ultimate_*.js
+verify_*.js
+vod_*.js
+server_reconstructed.js
+
+# Data files (usually runtime or large)
+channels.json
+tamil_channels.json
+
+# Audit reports
+*_audit_report.md
+*_validation.md
+*_audit.md

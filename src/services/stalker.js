@@ -6,7 +6,7 @@ export const getApiBaseUrl = () => {
   const isTizen = typeof window.tizen !== 'undefined' || typeof window.webapis !== 'undefined';
   const hostname = window.location.hostname;
   const savedIp = typeof window.localStorage !== 'undefined' ? window.localStorage.getItem('POOMANI_SERVER_IP') : null;
-  const serverIp = savedIp || hostname || '140.245.203.68';
+  const serverIp = savedIp || hostname || '192.168.1.10';
   
   if (hostname && hostname !== 'localhost' && hostname !== '127.0.0.1') {
     return `http://${hostname}:3001/api`;

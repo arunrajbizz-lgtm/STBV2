@@ -12,7 +12,7 @@ import os from 'os';
 
 // --- PROXY & VPN CONFIGURATION ---
 const PROXY_URL = process.env.PROXY_URL || 'http://localhost:40000';
-const CLOUDFLARE_WORKER_URL = 'https://poomani.arunrajbizz.workers.dev/';
+const CLOUDFLARE_WORKER_URL = '129.154.34.222';
 let proxyAgent = null;
 let vpnAgent = null;
 let vpnHttpsAgent = null;
@@ -20,8 +20,11 @@ let vpnHttpsAgent = null;
 // Smart Interface Detection (Indian VPN)
 const detectVpnInterface = () => {
     const interfaces = os.networkInterfaces();
+    const vpnPrefixes = ['tun', 'utun', 'wg', 'tap', 'ppp', 'tailscale', 'vpn', 'wintun'];
+    
     for (const iface in interfaces) {
-        if (iface.startsWith('tun') || iface.startsWith('utun')) {
+        const lowerIface = iface.toLowerCase();
+        if (vpnPrefixes.some(prefix => lowerIface.startsWith(prefix))) {
             const addr = interfaces[iface].find(a => a.family === 'IPv4');
             if (addr) {
                 console.log(`AUDIT: INDIAN_VPN_DETECTED`, { interface: iface, ip: addr.address });
@@ -32,7 +35,10 @@ const detectVpnInterface = () => {
             }
         }
     }
-    console.log(`AUDIT: NO_INDIAN_VPN_TUNNEL_FOUND`);
+    
+    console.log(`AUDIT: NO_INDIAN_VPN_TUNNEL_FOUND`, { 
+        availableInterfaces: Object.keys(interfaces) 
+    });
     return null;
 };
 const vpnLocalIp = detectVpnInterface();
@@ -334,8 +340,8 @@ class PortalClient {
        const url = (provider?.PORTAL_URL || '').toLowerCase();
        const isStrict = name.includes('JIO') || name.includes('AIRTEL') || url.includes('jiotv') || url.includes('airtel');
 
-       // Priority 1: If we have an Indian VPN (tun0), use it for strict providers (Best Performance)
-       if (isStrict && vpnAgent) {
+       // Priority 1: If we have an Indian VPN (tun0), use it for ALL providers (Best Performance for Seoul VM)
+       if (vpnAgent) {
            console.log(`[ROUTING] Indian VPN (tun0) enabled for ${name}`);
            return vpnAgent;
        }

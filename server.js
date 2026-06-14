@@ -1189,65 +1189,6 @@ class SearchIndexer {
     return allItems;
   }
 }
-               if (Array.isArray(seasonsRaw)) {
-                  seriesSeasons = [];
-                  for (const sRaw of seasonsRaw) {
-                     const epsRes = await portal.request('vod', 'get_ordered_list', { movie_id: s.id, season_id: sRaw.id }, 0, 10, provider);
-                     const epsRaw = epsRes.js?.data || epsRes.js || [];
-                     seriesSeasons.push({
-                        seasonId: sRaw.id,
-                        name: sRaw.name || "",
-                        episodes: Array.isArray(epsRaw) ? epsRaw.map(e => ({
-                           id: e.id,
-                           title: e.name || "",
-                           episodeId: e.id,
-                           cmd: e.cmd || ""
-                        })) : []
-                     });
-                     await new Promise(r => setTimeout(r, 50));
-                  }
-               }
-             } catch (err) {
-               // ignore
-             }
-          }
-
-          if (Array.isArray(seriesSeasons)) {
-             for (const season of seriesSeasons) {
-                const eps = season.episodes || [];
-                for (const ep of eps) {
-                   items.push({
-                     id: String(ep.id || ep.episodeId),
-                     title: ep.title ? `${s.name} - S${season.name || ''}E${ep.title}` : `${s.name} S${season.name || ''}E${ep.name || ''}`,
-                     type: 'episode',
-                     category: s.name || "",
-                     poster: s.screenshot_uri || s.poster || "",
-                     cmd: ep.cmd || "",
-                     providerId,
-                     seriesId: String(s.id),
-                     seasonId: String(season.seasonId),
-                     searchableText: `${s.name} s${season.name || ''}e${ep.title || ep.name || ''} ${ep.title || ep.name || ''} episode`.toLowerCase()
-                   });
-                }
-             }
-          }
-        }
-        seriesIndex++;
-        updateProgress(65 + (seriesIndex / (seriesCats.length + 1)) * 35);
-      }
-
-      const indexFilePath = path.join(process.cwd(), `search_index_${providerId}.json`);
-      fs.writeFileSync(indexFilePath, JSON.stringify(items, null, 2), 'utf8');
-      fs.writeFileSync(path.join(process.cwd(), 'search_index.json'), JSON.stringify(items, null, 2), 'utf8');
-
-      this.status[providerId] = { status: 'complete', progress: 100, itemsCount: items.length };
-      console.log(`SEARCH_INDEX_COMPLETE`, { count: items.length, providerName: provider.name });
-    } catch (err) {
-      console.error(`[SearchIndexer] Failed runIndexing:`, err.message);
-      this.status[providerId] = { status: 'failed', error: err.message, progress: 0, itemsCount: items.length };
-    }
-  }
-}
 
 const searchIndexer = new SearchIndexer();
 

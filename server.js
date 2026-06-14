@@ -12,7 +12,7 @@ import os from 'os';
 
 // --- PROXY & VPN CONFIGURATION ---
 const PROXY_URL = process.env.PROXY_URL || 'http://localhost:40000';
-const CLOUDFLARE_WORKER_URL = '129.154.34.222';
+const CLOUDFLARE_WORKER_URL = 'https://poomani.arunrajbizz.workers.dev/';
 let proxyAgent = null;
 
 // Smart Proxy Check: Only enable if a local proxy (WARP) is reachable
@@ -319,7 +319,8 @@ class PortalClient {
         const url = (originalUrl || '').toLowerCase();
         
         // ROUTE STRICT PROVIDERS THROUGH CLOUDFLARE BRIDGE
-        if (name.includes('JIO') || name.includes('AIRTEL') || url.includes('jiotv') || url.includes('airtel')) {
+        if (name.includes('JIO') || name.includes('AIRTEL') || name.includes('SBH') || 
+            url.includes('jiotv') || url.includes('airtel') || url.includes('sbhgold')) {
             // Note: Cloudflare worker is now smart enough to merge query params from its own URL
             return CLOUDFLARE_WORKER_URL + '?url=' + encodeURIComponent(originalUrl);
         }

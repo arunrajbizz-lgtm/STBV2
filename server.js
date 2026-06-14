@@ -1975,14 +1975,16 @@ app.get('/api/proxy-stream', async (req, res) => {
       const currentAgent = portal.getAgent(provider);
 
       // BRIDGE VIDEO STREAM THROUGH CLOUDFLARE WORKER FOR STRICT PROVIDERS
-      // Only bridge if we DON'T have a VPN. VPN is always better than a Bridge.
       const name = (provider?.name || '').toUpperCase();
-      if (!vpnAgent && (name.includes('JIO') || name.includes('AIRTEL') || finalUrl.includes('jiotv') || finalUrl.includes('airtel'))) {
+      const isStrict = name.includes('JIO') || name.includes('AIRTEL') || name.includes('SBH') || 
+                       finalUrl.includes('jiotv') || finalUrl.includes('airtel') || finalUrl.includes('sbhgold');
+
+      if (isStrict) {
           console.log(`[STREAM_BRIDGE] Routing ${name} stream through Cloudflare Worker`);
           finalUrl = `${CLOUDFLARE_WORKER_URL}?url=${encodeURIComponent(finalUrl)}`;
       }
 
-      console.log(`PLAYBACK_URL_STAGE_2_PROXY_REQUEST_URL`, { url: finalUrl, agent: currentAgent === vpnAgent ? 'INDIAN_VPN' : (currentAgent ? 'WARP' : 'DIRECT') });
+      console.log(`PLAYBACK_URL_STAGE_2_PROXY_REQUEST_URL`, { url: finalUrl, agent: currentAgent ? 'WARP' : 'DIRECT' });
       
       const resp = await axios({ 
         method: 'get', 
@@ -1991,7 +1993,7 @@ app.get('/api/proxy-stream', async (req, res) => {
         responseType: 'stream', 
         timeout: 15000, 
         validateStatus: false,
-        ...(currentAgent ? { httpsAgent: currentAgent === vpnAgent ? vpnHttpsAgent : currentAgent, httpAgent: currentAgent } : {})
+        ...(currentAgent ? { httpsAgent: currentAgent, httpAgent: currentAgent } : {})
       });
 
       console.log(`PLAYBACK_URL_STAGE_3_PROXY_RESPONSE_STATUS`, { status: resp.status });

@@ -1189,12 +1189,33 @@ app.get('/api/create-link', async (req, res) => {
     // Removed REWRITING_ITV_CMD_FOR_PORTAL logic to restore native portal command path
     
     const data = await portal.request(type || 'itv', 'create_link', params, 0, 100);
+    console.log(`CREATE_LINK_RAW_RESPONSE`, { data });
+
     let url = data.js?.cmd || data.cmd || data.js || '';
     if (typeof url !== 'string') throw new Error(data.js?.error || data.error || 'Link fault');
     
     console.log(`PLAYBACK_URL_STAGE_1_CREATE_LINK_RESPONSE`, { url });
 
-     res.json({ url: url ? `/api/proxy-stream?url=${encodeURIComponent(url.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}` : '' });
+    // Ensure we don't lose the stream ID if it was in the original request but missing in the response
+    const originalCmd = req.query.cmd || '';
+    const matchStreamOriginal = String(originalCmd).match(/[?&]stream=(\d+)/);
+    const matchStreamResponse = String(url).match(/[?&]stream=(\d+)/);
+    const streamId = matchStreamResponse ? matchStreamResponse[1] : (matchStreamOriginal ? matchStreamOriginal[1] : null);
+    
+    console.log(`STREAM_ID_EXTRACTED`, { streamId, fromResponse: !!matchStreamResponse, fromOriginal: !!matchStreamOriginal });
+
+    let finalProxyUrl = url ? `/api/proxy-stream?url=${encodeURIComponent(url.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}` : '';
+    
+    // Recovery: If the URL has stream= but it's empty, and we have a streamId, fix it
+    if (finalProxyUrl.includes('stream=&') && streamId) {
+        finalProxyUrl = finalProxyUrl.replace('stream=&', `stream=${streamId}&`);
+    } else if (finalProxyUrl.endsWith('stream=') && streamId) {
+        finalProxyUrl = finalProxyUrl + streamId;
+    }
+
+    console.log(`PROXY_STREAM_FINAL_URL`, { finalProxyUrl });
+
+    res.json({ url: finalProxyUrl });
   } catch (error) { 
     console.error(`AUDIT: CREATE_LINK_FAILED`, error.message);
     res.json({ url: '', error: error.message }); 

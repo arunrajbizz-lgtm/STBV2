@@ -258,10 +258,15 @@ const getHeaders = (opts = {}, providerOverride = null) => {
   const baseUrl = (provider.PORTAL_URL || '').replace(/\/c\/?$/, '').replace(/\/$/, '');
   const referer = provider.REFERER || `${baseUrl}/c/`;
   const mac = provider.MAC || '';
+  const providerName = (provider.name || '').toUpperCase();
 
+  // AUTHENTIC MAG IDENTITY STRATEGY
   const magUA = 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3';
-
-  let cookie = `mac=${mac}; stb_lang=en; timezone=GMT;`;
+  
+  // Airtel/Jio require more authentic headers
+  const isStrict = providerName.includes('AIRTEL') || providerName.includes('JIO');
+  
+  let cookie = `mac=${mac}; stb_lang=en; timezone=Asia/Kolkata;`;
   if (opts.token && !opts.isCdn) {
     cookie += ` token=${opts.token};`;
   }
@@ -274,7 +279,10 @@ const getHeaders = (opts = {}, providerOverride = null) => {
     'Cookie': cookie,
     'X-STB-MAC': mac,
     'Accept': '*/*',
-    'Connection': 'keep-alive'
+    'Connection': 'keep-alive',
+    // SPOOFING RESIDENTIAL IP: Trick portal into thinking connection is from an Indian ISP
+    'X-Forwarded-For': `49.36.${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*255)}`,
+    'X-Real-IP': `49.36.${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*255)}`
   };
 
   if (opts.token && !opts.isCdn) {
@@ -293,6 +301,30 @@ class PortalClient {
     this.CACHE_TTL = 3600 * 1000;
     this.pendingRequests = new Map();
     this.priorityActiveCount = 0;
+    
+    // PER-PROVIDER ROUTING LOGIC
+    // Determine if a provider should use the VPN proxy or a direct connection
+    this.getAgent = (provider) => {
+       if (!proxyAgent) return null; // No VPN available
+       
+       const name = (provider?.name || '').toUpperCase();
+       const url = (provider?.PORTAL_URL || '').toLowerCase();
+       
+       // SBH is fast and trusted - use direct connection to avoid VPN overhead/latency
+       if (name.includes('SBH') || url.includes('sbhgoldpro')) {
+           console.log(`[ROUTING] Direct connection for SBH`);
+           return null; 
+       }
+       
+       // JIOTV and AIRTEL are blocked on Oracle ASN - MUST use Proxy (WARP)
+       if (name.includes('JIO') || name.includes('AIRTEL') || url.includes('jiotv') || url.includes('airtel')) {
+           console.log(`[ROUTING] Proxy (WARP) enabled for ${name}`);
+           return proxyAgent;
+       }
+       
+       // Default: use proxy if available (safest for unknown providers)
+       return proxyAgent;
+    };
 
     // Load existing token from cache if present for active provider
     if (PERSISTENT_CACHE_DATA.auth?.token) {
@@ -366,9 +398,26 @@ class PortalClient {
     const sn = provider.SN || Buffer.from(mac.replace(/:/g, '')).toString('hex').toUpperCase().substring(0, 13);
     const device_id = provider.DEVICE_ID || crypto.createHash('sha256').update(mac).digest('hex').toUpperCase();
     const signature = provider.SIGNATURE || crypto.createHash('sha256').update(sn).digest('hex').toUpperCase();
+    
+    // AIRTEL-OPTIMIZED SIGNATURE
+    const providerName = (provider.name || '').toUpperCase();
     let hw2 = provider.HW_VERSION_2 || '2.18-r14';
-    if (provider.PORTAL_URL && provider.PORTAL_URL.includes('Jiotv.be')) hw2 = sn.toLowerCase() + '21c29bcaee8b4b0f103';
-    return { sn, device_id, device_id2: device_id, signature, hw_version: provider.HW_VERSION || '1.6-BD-00', hw_version_2: hw2 };
+    
+    if (provider.PORTAL_URL && provider.PORTAL_URL.includes('Jiotv.be')) {
+        hw2 = sn.toLowerCase() + '21c29bcaee8b4b0f103';
+    } else if (providerName.includes('AIRTEL')) {
+        // Authentic MAG254/270 hardware signature pattern for Airtel
+        hw2 = '2.18-r14-pub-270'; 
+    }
+    
+    return { 
+        sn, 
+        device_id, 
+        device_id2: device_id, 
+        signature, 
+        hw_version: provider.HW_VERSION || '1.6-BD-00', 
+        hw_version_2: hw2 
+    };
   }
 
   async authorize(force = false, priority = 10, source = 'unknown', providerOverride = null) {
@@ -401,18 +450,20 @@ class PortalClient {
     const authPromise = (async () => {
       try {
         let attempts = 0;
+        const agent = this.getAgent(provider);
+        
         while (attempts < 3) {
           try {
             const portalUrl = normalizePortalUrl(provider.PORTAL_URL);
             const authParams = this._getAuthParams(provider);
             
-            console.log("AUDIT: AUTH_STEP_1_HANDSHAKE", { providerName: provider.name, source, attempt: attempts, proxy: !!proxyAgent });
+            console.log("AUDIT: AUTH_STEP_1_HANDSHAKE", { providerName: provider.name, source, attempt: attempts, proxy: !!agent });
             const response = await axios.post(portalUrl, null, {
               params: { type: 'stb', action: 'handshake', token: '', ...authParams, JsHttpRequest: '1-xml' },
               headers: getHeaders({ token: '' }, provider),
               timeout: 20000,
               validateStatus: false,
-              ...(proxyAgent ? { httpsAgent: proxyAgent, httpAgent: proxyAgent } : {})
+              ...(agent ? { httpsAgent: agent, httpAgent: agent } : {})
             });
             
             if (response.status === 429) {
@@ -465,7 +516,8 @@ class PortalClient {
             const profile = await axios.post(portalUrl, null, {
               params: profileParams,
               headers: getHeaders({ token }, provider),
-              timeout: 20000
+              timeout: 20000,
+              ...(agent ? { httpsAgent: agent, httpAgent: agent } : {})
             });
 
             if (profile.data?.js === false || profile.data?.error === 'Authorization failed') {
@@ -527,10 +579,11 @@ class PortalClient {
     const requestPromise = portalQueue.add(async () => {
       let currentRetry = retryCount;
       const maxRetries = 3;
+      const agent = this.getAgent(provider);
 
       while (true) {
         try {
-          console.log(`AUDIT: PORTAL_REQUEST_EXECUTE`, { providerName: provider.name, type, action, priority, retry: currentRetry });
+          console.log(`AUDIT: PORTAL_REQUEST_EXECUTE`, { providerName: provider.name, type, action, priority, retry: currentRetry, proxy: !!agent });
           const usedToken = await this.authorize(false, priority + 1, `${type}:${action}`, provider);
           const authParams = this._getAuthParams(provider);
           
@@ -538,7 +591,7 @@ class PortalClient {
             params: { type, action: action, ...params, ...authParams, token: usedToken, JsHttpRequest: '1-xml' },
             headers: getHeaders({ token: usedToken }, provider),
             timeout: 15000,
-            ...(proxyAgent ? { httpsAgent: proxyAgent, httpAgent: proxyAgent } : {})
+            ...(agent ? { httpsAgent: agent, httpAgent: agent } : {})
           });
 
           const responseData = response.data;

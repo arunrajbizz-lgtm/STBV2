@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import Home from './pages/Home';
 import Settings from './pages/Settings';
+import Search from './pages/Search';
 import ChannelGrid from './components/ChannelGrid';
 import MovieGrid from './components/MovieGrid';
 import SeriesGrid from './components/SeriesGrid';
@@ -189,7 +190,8 @@ const App = () => {
         item.cmd.startsWith('/media') ||
         item.cmd.startsWith('ffrt') ||
         item.cmd.startsWith('auto') ||
-        item.cmd.startsWith('ffmpeg')
+        item.cmd.startsWith('ffmpeg') ||
+        item.cmd.startsWith('ey')
       );
       const isCollectionFolder = !fromCollection && isMovie && (
         item.type === 'folder' ||
@@ -237,12 +239,15 @@ const App = () => {
       let normalizedItem = null;
       if (isPlaying) setPlayUrl(null);
 
-      if (isSeries) {
-         const seriesMeta = metadataCacheRef.current[activeSeries?.id] || activeSeries || {};
+      const isSeriesPlay = isSeries || item.type === 'episode';
+
+      if (isSeriesPlay) {
+         const sId = item.seriesId || activeSeries?.id;
+         const seriesMeta = metadataCacheRef.current[sId] || { id: sId, name: item.category };
          normalizedItem = { 
             ...seriesMeta,
             ...item, 
-            series_name: seriesMeta.name || seriesMeta.title,
+            series_name: seriesMeta.name || seriesMeta.title || item.category,
             type: "episode", 
             isLive: false 
          };
@@ -258,8 +263,10 @@ const App = () => {
       let url = null;
       const itemId = item.episodeId || item.id;
       
-      if (isSeries) {
-         url = (await StalkerService.getEpisodeLink(activeSeries?.id, activeSeasonId, itemId))?.url;
+      if (isSeriesPlay) {
+         const sId = item.seriesId || activeSeries?.id;
+         const snId = item.seasonId || activeSeasonId;
+         url = (await StalkerService.getEpisodeLink(sId, snId, itemId))?.url;
       }
       else if (isMovie) {
          url = (await StalkerService.getMovieLink(itemId, item.cmd))?.url;
@@ -276,6 +283,28 @@ const App = () => {
     } catch (e) { console.error("Playback error", e); }
   };
 
+  const handleSelectSeriesFromSearch = useCallback(async (seriesItem) => {
+     setActivePage('library');
+     setActiveSeries(seriesItem);
+     setNavZone('details');
+     setContentSubZone('seasons');
+     setFocusedSeasonIndex(0);
+     
+     try {
+       const res = await StalkerService.getSeriesInfo(seriesItem.id);
+       const seriesSeasons = res?.seasons || [];
+       setSeasons(seriesSeasons);
+       if (seriesSeasons.length > 0) {
+          setActiveSeasonId(seriesSeasons[0].seasonId);
+          setEpisodes(seriesSeasons[0].episodes || []);
+       }
+     } catch (err) {
+       console.error("Failed to load series info from search selection", err);
+       setSeasons([]);
+       setEpisodes([]);
+     }
+  }, [setActivePage, setActiveSeries, setNavZone, setContentSubZone, setFocusedSeasonIndex, setSeasons, setActiveSeasonId, setEpisodes]);
+
   const handleNextChannel = useCallback(() => {
     if (activePage === 'live') {
       const idx = liveChannels.findIndex(c => c.id === currentItem.id);
@@ -290,6 +319,17 @@ const App = () => {
     }
   }, [activePage, liveChannels, currentItem, handlePlay]);
 
+  const handleToggleFavorite = useCallback((ch) => {
+    if (!ch) return;
+    const favs = storage.get(STORAGE_KEYS.FAVORITES) || [];
+    const isFav = favs.some(f => f.id === ch.id);
+    const newFavs = isFav ? favs.filter(f => f.id !== ch.id) : [...favs, ch];
+    storage.set(STORAGE_KEYS.FAVORITES, newFavs);
+    setFavorites(newFavs);
+    window.dispatchEvent(new CustomEvent('show_toast', { detail: isFav ? 'Removed from Favorites' : 'Added to Favorites' }));
+    window.dispatchEvent(new CustomEvent('favorites_updated'));
+  }, []);
+
   const handleKeyDown = useCallback(async (e) => {
     const key = e.keyCode;
     if (showEditor) return;
@@ -299,6 +339,10 @@ const App = () => {
          setIsPlaying(false);
       }
       return; 
+    }
+
+    if (activePage === 'search' && navZone === 'content') {
+       return;
     }
 
     const colsMap = { home: 1, live: 1, cinema: 6, library: 6 };
@@ -326,14 +370,14 @@ const App = () => {
       if (key === 13) {
         const pageId = MENU_ITEMS[sidebarFocusedIndex].id;
         setActivePage(pageId);
-        setNavZone('category');
+        setNavZone(pageId === 'search' || pageId === 'home' || pageId === 'settings' ? 'content' : 'category');
         setCategoryFocusedIndex(0);
         setContentFocusedIndex(0);
         loadDataForPage(pageId);
       }
       if (key === 39) {
-         setNavZone(activePage === 'home' || activePage === 'settings' ? 'content' : 'category');
-         if (activePage === 'home' || activePage === 'settings') {
+         setNavZone(activePage === 'home' || activePage === 'settings' || activePage === 'search' ? 'content' : 'category');
+         if (activePage === 'home' || activePage === 'settings' || activePage === 'search') {
              const memKey = `${activePage}_home`;
              setContentFocusedIndex(focusMemory[memKey] || 0);
          }
@@ -476,23 +520,39 @@ const App = () => {
          const item = items[contentFocusedIndex];
          if (!item) return;
          if (activePage === 'library') {
-            setActiveSeries(item);
-            setNavZone('details');
-            setContentSubZone('seasons');
-            setFocusedSeasonIndex(0);
-            
-            StalkerService.getSeriesInfo(item.id).then(res => {
-               const seriesSeasons = res?.seasons || [];
-               setSeasons(seriesSeasons);
-               if (seriesSeasons.length > 0) {
-                  setActiveSeasonId(seriesSeasons[0].seasonId);
-                  setEpisodes(seriesSeasons[0].episodes || []);
-               }
-            }).catch(err => {
-               console.error("Failed to load series info", err);
-               setSeasons([]);
-               setEpisodes([]);
-            });
+             const isRealSeries = item && (
+                item.is_series === '1' || 
+                item.is_series === 1 || 
+                item.is_season || 
+                item.season_series || 
+                item.is_episode || 
+                item.season_id || 
+                (Array.isArray(item.series) && item.series.length > 0) || 
+                (item.series && !Array.isArray(item.series))
+             );
+
+             if (!isRealSeries) {
+                // Play directly as a movie
+                handlePlay(item, true, false);
+             } else {
+                setActiveSeries(item);
+                setNavZone('details');
+                setContentSubZone('seasons');
+                setFocusedSeasonIndex(0);
+                
+                StalkerService.getSeriesInfo(item.id).then(res => {
+                   const seriesSeasons = res?.seasons || [];
+                   setSeasons(seriesSeasons);
+                   if (seriesSeasons.length > 0) {
+                      setActiveSeasonId(seriesSeasons[0].seasonId);
+                      setEpisodes(seriesSeasons[0].episodes || []);
+                   }
+                }).catch(err => {
+                   console.error("Failed to load series info", err);
+                   setSeasons([]);
+                   setEpisodes([]);
+                });
+             }
          } else {
             handlePlay(item, activePage === 'cinema');
          }
@@ -742,6 +802,8 @@ const App = () => {
           channels={activePage === 'live' ? liveChannels : []} 
           onNext={() => { if(activePage==='live') { const idx = liveChannels.findIndex(c=>c.id===currentItem.id); if(idx < liveChannels.length-1) handlePlay(liveChannels[idx+1], false, false); } }} 
           onPrev={() => { if(activePage==='live') { const idx = liveChannels.findIndex(c=>c.id===currentItem.id); if(idx > 0) handlePlay(liveChannels[idx-1], false, false); } }} 
+          onToggleFavorite={handleToggleFavorite}
+          isFavorite={favorites.some(f => f.id === currentItem?.id)}
         />
       ) : (
 
@@ -766,6 +828,13 @@ const App = () => {
                />
             )}
             {activePage === 'library' && <SeriesGrid categories={libraryCategories} series={seriesItems} activeCategoryId={activeLibraryCategoryId} focusedCategoryIndex={categoryFocusedIndex} focusedSeriesIndex={contentFocusedIndex} focusedSeasonIndex={focusedSeasonIndex} focusedEpisodeIndex={focusedEpisodeIndex} activeSeries={activeSeries} seasons={seasons} episodes={episodes} activeSeasonId={activeSeasonId} isCategoryFocused={navZone === 'category'} navZone={navZone} contentSubZone={contentSubZone} activeProvider={activeProvider} metadataCache={metadataCacheRef.current} setEnrichedData={setEnrichedData} />}
+            {activePage === 'search' && (
+               <Search 
+                  activeProvider={activeProvider} 
+                  onPlay={handlePlay} 
+                  onSelectSeries={handleSelectSeriesFromSearch} 
+               />
+            )}
             {activePage === 'settings' && <Settings providers={providers} settings={{ playerEngine, screenMode }} focusedIndex={contentFocusedIndex} focusedSubIndex={focusedSubIndex} isFocused={navZone === 'content'} activeProvider={activeProvider} />}
           </main>
         </>

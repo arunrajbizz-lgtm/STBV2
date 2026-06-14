@@ -136,7 +136,7 @@ class PlayerService {
         this.log("Forcing mpegts engine for TS stream");
         engine = 'mpegts';
       } else if (engine === 'auto') {
-        if (window.Hls && window.Hls.isSupported()) {
+        if (isM3u8 && window.Hls && window.Hls.isSupported()) {
           engine = 'hlsjs';
         } else {
           engine = 'html5';

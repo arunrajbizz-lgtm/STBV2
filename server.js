@@ -451,6 +451,12 @@ class PortalClient {
             saveCache();
 
             console.log("AUDIT: AUTHORIZATION_SUCCESS", { providerName: provider.name, source });
+            // Trigger background search indexing
+            setTimeout(() => {
+                if (typeof searchIndexer !== 'undefined') {
+                   searchIndexer.startIndexing(provider, false);
+                }
+            }, 5000);
             return token;
           } catch (err) {
             if (err.message.includes('429') && attempts < 3) {
@@ -699,6 +705,16 @@ app.post('/api/client-log', (req, res) => {
   res.json({ success: true });
 });
 
+// --- SEARCH ENDPOINTS ---
+app.get('/api/search', (req, res) => {
+  res.json(searchIndexer.search(req.query.q || ''));
+});
+
+app.get('/api/search/status', (req, res) => {
+  const pid = providerManager.getActiveProvider()?.id;
+  res.json(searchIndexer.status[pid] || { status: 'idle' });
+});
+
 // --- PLAYBACK PRIORITY ENDPOINTS ---
 app.post('/api/playback-priority/enter', (req, res) => {
   portal.enterPlaybackPriority();
@@ -755,6 +771,9 @@ app.post('/api/providers/activate/:id', (req, res) => {
     PERSISTENT_CACHE_DATA.epg = {};            // FIX: channel IDs differ per provider
     // Persist the cleared cache to disk immediately
     saveCache();
+    if (typeof searchIndexer !== 'undefined') {
+       searchIndexer.status[req.params.id] = { status: 'idle', progress: 0, itemsCount: 0 };
+    }
     console.log('PROVIDER_SWITCHED: all caches cleared for provider', req.params.id);
     res.json({ success: true });
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -959,6 +978,271 @@ const restoreStreamId = (url, originalCmd) => {
   }
   return url;
 };
+
+const fetchAllPagesInternal = async (type, action, initialParams = {}, provider) => {
+  const allItems = [];
+  let page = 1;
+  const perPage = 100;
+  
+  while (page < 100) {
+    const params = {
+      ...initialParams,
+      p: page,
+      perpage: perPage,
+      JsHttpRequest: '1-xml'
+    };
+    try {
+      const data = await portal.request(type, action, params, 0, 10, provider);
+      const items = data.js?.data || data.js || [];
+      if (!Array.isArray(items) || items.length === 0) break;
+      allItems.push(...items);
+      if (items.length < perPage) break;
+      page++;
+      await new Promise(r => setTimeout(r, 100));
+    } catch (e) {
+      console.error(`[SearchIndexer] fetchAllPagesInternal failed on page ${page}:`, e.message);
+      break;
+    }
+  }
+  return allItems;
+};
+
+class SearchIndexer {
+  constructor() {
+    this.status = {};
+    this.indexingActive = {};
+  }
+  
+  getStatus(providerId) {
+    return this.status[providerId] || { status: 'idle', progress: 0, itemsCount: 0 };
+  }
+
+  async startIndexing(provider, force = false) {
+    const providerId = provider.id;
+    if (this.indexingActive[providerId]) {
+      console.log(`[SearchIndexer] Indexing already in progress for provider: ${provider.name}`);
+      return;
+    }
+    
+    const indexFilePath = path.join(process.cwd(), `search_index_${providerId}.json`);
+    try {
+      if (!force && fs.existsSync(indexFilePath)) {
+        const stats = fs.statSync(indexFilePath);
+        const ageHours = (Date.now() - stats.mtimeMs) / (3600 * 1000);
+        if (ageHours < 6) {
+          console.log(`[SearchIndexer] Index is fresh (${ageHours.toFixed(1)}h old). Skipping indexing.`);
+          const data = JSON.parse(fs.readFileSync(indexFilePath, 'utf8'));
+          this.status[providerId] = { status: 'complete', progress: 100, itemsCount: data.length };
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn(`[SearchIndexer] Failed to check cached index:`, e.message);
+    }
+
+    this.indexingActive[providerId] = true;
+    this.status[providerId] = { status: 'indexing', progress: 0, itemsCount: 0 };
+    console.log(`SEARCH_INDEX_START`, { providerName: provider.name });
+
+    setTimeout(async () => {
+      try {
+        await this._runIndexing(provider);
+      } catch (err) {
+        console.error(`[SearchIndexer] Indexing failed:`, err.message);
+        this.status[providerId] = { status: 'failed', error: err.message, progress: 0, itemsCount: 0 };
+      } finally {
+        this.indexingActive[providerId] = false;
+      }
+    }, 0);
+  }
+
+  async _runIndexing(provider) {
+    const providerId = provider.id;
+    const items = [];
+    
+    const updateProgress = (progress) => {
+      this.status[providerId] = { status: 'indexing', progress: Math.min(99, Math.round(progress)), itemsCount: items.length };
+      console.log(`SEARCH_INDEX_ITEMS`, { count: items.length, progress: Math.round(progress) });
+    };
+
+    try {
+      // 1. Fetch Live Categories
+      const liveCatsData = await portal.request('itv', 'get_genres', {}, 0, 10, provider);
+      const liveCats = filterAndSortCategories(liveCatsData.js || []);
+      
+      // 2. Fetch Live Channels
+      let liveIndex = 0;
+      for (const cat of liveCats) {
+        const catId = cat.id;
+        const catName = cat.title || cat.name || "";
+        const chData = await fetchAllPagesInternal('itv', 'get_ordered_list', { genre: catId, sortby: 'number' }, provider);
+        for (const ch of chData) {
+          items.push({
+            id: String(ch.id),
+            title: ch.name || "",
+            type: 'live',
+            category: catName,
+            poster: ch.logo || "",
+            cmd: ch.cmd || "",
+            providerId,
+            searchableText: `${ch.name} ${catName} live channel tv`.toLowerCase()
+          });
+        }
+        liveIndex++;
+        updateProgress((liveIndex / (liveCats.length + 2)) * 30);
+      }
+
+      // 3. Fetch VOD Categories
+      const vodCatsData = await portal.request('vod', 'get_categories', {}, 0, 10, provider);
+      const vodCats = filterAndSortCategories(vodCatsData.js || []);
+      
+      const movieCats = vodCats.filter(cat => !/series|tv shows|show|serial|season|episode|web series|natak|natok/i.test(cat.title || cat.name || ""));
+      const seriesCats = vodCats.filter(cat => /series|tv shows|show|serial|season|episode|web series|natak|natok/i.test(cat.title || cat.name || ""));
+
+      // 4. Fetch Movies
+      let movieIndex = 0;
+      for (const cat of movieCats) {
+        const catId = cat.id;
+        const catName = cat.title || cat.name || "";
+        const movieData = await fetchAllPagesInternal('vod', 'get_ordered_list', { category: catId }, provider);
+        for (const m of movieData) {
+          items.push({
+            id: String(m.id),
+            title: m.name || "",
+            type: 'movie',
+            category: catName,
+            poster: m.screenshot_uri || m.poster || "",
+            cmd: m.cmd || "",
+            providerId,
+            searchableText: `${m.name} ${catName} movie film`.toLowerCase()
+          });
+        }
+        movieIndex++;
+        updateProgress(30 + (movieIndex / (movieCats.length + 1)) * 35);
+      }
+
+      // 5. Fetch Series & Episodes
+      let seriesIndex = 0;
+      for (const cat of seriesCats) {
+        const catId = cat.id;
+        const catName = cat.title || cat.name || "";
+        const seriesData = await fetchAllPagesInternal('vod', 'get_ordered_list', { category: catId }, provider);
+        
+        for (const s of seriesData) {
+          items.push({
+            id: String(s.id),
+            title: s.name || "",
+            type: 'series',
+            category: catName,
+            poster: s.screenshot_uri || s.poster || "",
+            cmd: s.cmd || "",
+            providerId,
+            searchableText: `${s.name} ${catName} series tvshow season`.toLowerCase()
+          });
+
+          // Fetch seasons & episodes
+          let seriesSeasons = [];
+          if (PERSISTENT_CACHE_DATA.seriesInfo?.[s.id]?.data?.seasons) {
+             seriesSeasons = PERSISTENT_CACHE_DATA.seriesInfo[s.id].data.seasons;
+          } else {
+             try {
+               const seasonsRes = await portal.request('vod', 'get_ordered_list', { movie_id: s.id }, 0, 10, provider);
+               const seasonsRaw = seasonsRes.js?.data || seasonsRes.js || [];
+               if (Array.isArray(seasonsRaw)) {
+                  seriesSeasons = [];
+                  for (const sRaw of seasonsRaw) {
+                     const epsRes = await portal.request('vod', 'get_ordered_list', { movie_id: s.id, season_id: sRaw.id }, 0, 10, provider);
+                     const epsRaw = epsRes.js?.data || epsRes.js || [];
+                     seriesSeasons.push({
+                        seasonId: sRaw.id,
+                        name: sRaw.name || "",
+                        episodes: Array.isArray(epsRaw) ? epsRaw.map(e => ({
+                           id: e.id,
+                           title: e.name || "",
+                           episodeId: e.id,
+                           cmd: e.cmd || ""
+                        })) : []
+                     });
+                     await new Promise(r => setTimeout(r, 50));
+                  }
+               }
+             } catch (err) {
+               // ignore
+             }
+          }
+
+          if (Array.isArray(seriesSeasons)) {
+             for (const season of seriesSeasons) {
+                const eps = season.episodes || [];
+                for (const ep of eps) {
+                   items.push({
+                     id: String(ep.id || ep.episodeId),
+                     title: ep.title ? `${s.name} - S${season.name || ''}E${ep.title}` : `${s.name} S${season.name || ''}E${ep.name || ''}`,
+                     type: 'episode',
+                     category: s.name || "",
+                     poster: s.screenshot_uri || s.poster || "",
+                     cmd: ep.cmd || "",
+                     providerId,
+                     seriesId: String(s.id),
+                     seasonId: String(season.seasonId),
+                     searchableText: `${s.name} s${season.name || ''}e${ep.title || ep.name || ''} ${ep.title || ep.name || ''} episode`.toLowerCase()
+                   });
+                }
+             }
+          }
+        }
+        seriesIndex++;
+        updateProgress(65 + (seriesIndex / (seriesCats.length + 1)) * 35);
+      }
+
+      const indexFilePath = path.join(process.cwd(), `search_index_${providerId}.json`);
+      fs.writeFileSync(indexFilePath, JSON.stringify(items, null, 2), 'utf8');
+      fs.writeFileSync(path.join(process.cwd(), 'search_index.json'), JSON.stringify(items, null, 2), 'utf8');
+
+      this.status[providerId] = { status: 'complete', progress: 100, itemsCount: items.length };
+      console.log(`SEARCH_INDEX_COMPLETE`, { count: items.length, providerName: provider.name });
+    } catch (err) {
+      console.error(`[SearchIndexer] Failed runIndexing:`, err.message);
+      this.status[providerId] = { status: 'failed', error: err.message, progress: 0, itemsCount: items.length };
+    }
+  }
+}
+
+const searchIndexer = new SearchIndexer();
+
+setInterval(() => {
+  const provider = providerManager.getActiveProvider();
+  if (provider) {
+    searchIndexer.startIndexing(provider, false);
+  }
+}, 3600 * 1000);
+
+app.get('/api/search/status', (req, res) => {
+  const provider = providerManager.getActiveProvider();
+  if (!provider) return res.json({ status: 'idle', progress: 0, itemsCount: 0 });
+  res.json(searchIndexer.getStatus(provider.id));
+});
+
+app.post('/api/search/trigger', (req, res) => {
+  const provider = providerManager.getActiveProvider();
+  if (!provider) return res.status(400).json({ error: 'No active provider' });
+  const force = req.query.force === 'true';
+  searchIndexer.startIndexing(provider, force);
+  res.json({ success: true });
+});
+
+app.get('/api/search/index', (req, res) => {
+  const provider = providerManager.getActiveProvider();
+  if (!provider) return res.json([]);
+  const indexFilePath = path.join(process.cwd(), `search_index_${provider.id}.json`);
+  if (fs.existsSync(indexFilePath)) {
+    console.log(`SEARCH_CACHE_HIT`, { providerName: provider.name });
+    res.setHeader('Content-Type', 'application/json');
+    fs.createReadStream(indexFilePath).pipe(res);
+  } else {
+    res.json([]);
+  }
+});
 
 app.get('/api/create-link', async (req, res) => {
   const { cmd, type, movie_id } = req.query;

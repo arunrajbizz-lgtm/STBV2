@@ -8,10 +8,34 @@ import http from 'http';
 import https from 'https';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
-// --- PROXY CONFIGURATION ---
+import os from 'os';
+
+// --- PROXY & VPN CONFIGURATION ---
 const PROXY_URL = process.env.PROXY_URL || 'http://localhost:40000';
 const CLOUDFLARE_WORKER_URL = 'https://poomani.arunrajbizz.workers.dev/';
 let proxyAgent = null;
+let vpnAgent = null;
+let vpnHttpsAgent = null;
+
+// Smart Interface Detection (Indian VPN)
+const detectVpnInterface = () => {
+    const interfaces = os.networkInterfaces();
+    for (const iface in interfaces) {
+        if (iface.startsWith('tun') || iface.startsWith('utun')) {
+            const addr = interfaces[iface].find(a => a.family === 'IPv4');
+            if (addr) {
+                console.log(`AUDIT: INDIAN_VPN_DETECTED`, { interface: iface, ip: addr.address });
+                // Bind Axios to the VPN IP so it uses the Indian tunnel
+                vpnAgent = new http.Agent({ localAddress: addr.address, keepAlive: true });
+                vpnHttpsAgent = new https.Agent({ localAddress: addr.address, keepAlive: true, rejectUnauthorized: false });
+                return addr.address;
+            }
+        }
+    }
+    console.log(`AUDIT: NO_INDIAN_VPN_TUNNEL_FOUND`);
+    return null;
+};
+const vpnLocalIp = detectVpnInterface();
 
 // Smart Proxy Check: Only enable if a local proxy (WARP) is reachable
 const checkProxy = async () => {
@@ -304,20 +328,22 @@ class PortalClient {
     this.priorityActiveCount = 0;
     
     // PER-PROVIDER ROUTING LOGIC
-    // Determine if a provider should use the VPN proxy or a direct connection
+    // Determine if a provider should use the VPN proxy, Bridge, or a direct connection
     this.getAgent = (provider) => {
-       if (!proxyAgent) return null; // No local proxy available
-       
        const name = (provider?.name || '').toUpperCase();
        const url = (provider?.PORTAL_URL || '').toLowerCase();
-       
-       // SBH is fast and trusted - use direct connection to avoid VPN overhead/latency
-       if (name.includes('SBH') || url.includes('sbhgoldpro')) {
-           return null; 
+       const isStrict = name.includes('JIO') || name.includes('AIRTEL') || url.includes('jiotv') || url.includes('airtel');
+
+       // Priority 1: If we have an Indian VPN (tun0), use it for strict providers (Best Performance)
+       if (isStrict && vpnAgent) {
+           console.log(`[ROUTING] Indian VPN (tun0) enabled for ${name}`);
+           return vpnAgent;
        }
+
+       // Priority 2: Use local proxyAgent (WARP) as fallback if available
+       if (proxyAgent) return proxyAgent;
        
-       // Default: use local proxyAgent (WARP) if available
-       return proxyAgent;
+       return null; 
     };
 
     this.getPortalUrl = (provider, originalUrl) => {
@@ -1978,14 +2004,17 @@ app.get('/api/proxy-stream', async (req, res) => {
         finalUrl += (finalUrl.includes('?') ? '&' : '?') + `token=${usedToken}`;
       }
 
+      const currentAgent = portal.getAgent(provider);
+
       // BRIDGE VIDEO STREAM THROUGH CLOUDFLARE WORKER FOR STRICT PROVIDERS
+      // Only bridge if we DON'T have a VPN. VPN is always better than a Bridge.
       const name = (provider?.name || '').toUpperCase();
-      if (name.includes('JIO') || name.includes('AIRTEL') || finalUrl.includes('jiotv') || finalUrl.includes('airtel')) {
+      if (!vpnAgent && (name.includes('JIO') || name.includes('AIRTEL') || finalUrl.includes('jiotv') || finalUrl.includes('airtel'))) {
           console.log(`[STREAM_BRIDGE] Routing ${name} stream through Cloudflare Worker`);
           finalUrl = `${CLOUDFLARE_WORKER_URL}?url=${encodeURIComponent(finalUrl)}`;
       }
 
-      console.log(`PLAYBACK_URL_STAGE_2_PROXY_REQUEST_URL`, { url: finalUrl });
+      console.log(`PLAYBACK_URL_STAGE_2_PROXY_REQUEST_URL`, { url: finalUrl, agent: currentAgent === vpnAgent ? 'INDIAN_VPN' : (currentAgent ? 'WARP' : 'DIRECT') });
       
       const resp = await axios({ 
         method: 'get', 
@@ -1994,7 +2023,7 @@ app.get('/api/proxy-stream', async (req, res) => {
         responseType: 'stream', 
         timeout: 15000, 
         validateStatus: false,
-        ...(proxyAgent ? { httpsAgent: proxyAgent, httpAgent: proxyAgent } : {})
+        ...(currentAgent ? { httpsAgent: currentAgent === vpnAgent ? vpnHttpsAgent : currentAgent, httpAgent: currentAgent } : {})
       });
 
       console.log(`PLAYBACK_URL_STAGE_3_PROXY_RESPONSE_STATUS`, { status: resp.status });

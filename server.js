@@ -1046,6 +1046,11 @@ class SearchIndexer {
 
     setTimeout(async () => {
       try {
+        // --- STEALTH INDEXING MODIFICATION ---
+        // Add a random startup delay to avoid synchronized bot patterns
+        const startupDelay = Math.floor(Math.random() * 5000) + 2000;
+        await new Promise(r => setTimeout(r, startupDelay));
+        
         await this._runIndexing(provider);
       } catch (err) {
         console.error(`[SearchIndexer] Indexing failed:`, err.message);
@@ -1060,6 +1065,12 @@ class SearchIndexer {
     const providerId = provider.id;
     const items = [];
     
+    // Increased delay from 100ms -> 2000ms + Randomness for stealth
+    const stealthDelay = async (factor = 1) => {
+        const ms = (Math.floor(Math.random() * 1500) + 1500) * factor; // 1.5s to 3s delay
+        await new Promise(r => setTimeout(r, ms));
+    };
+
     const updateProgress = (progress) => {
       this.status[providerId] = { status: 'indexing', progress: Math.min(99, Math.round(progress)), itemsCount: items.length };
       console.log(`SEARCH_INDEX_ITEMS`, { count: items.length, progress: Math.round(progress) });
@@ -1075,7 +1086,10 @@ class SearchIndexer {
       for (const cat of liveCats) {
         const catId = cat.id;
         const catName = cat.title || cat.name || "";
-        const chData = await fetchAllPagesInternal('itv', 'get_ordered_list', { genre: catId, sortby: 'number' }, provider);
+        
+        // Use custom internal fetcher with stealth delay
+        const chData = await this._fetchAllPagesStealth('itv', 'get_ordered_list', { genre: catId, sortby: 'number' }, provider, stealthDelay);
+        
         for (const ch of chData) {
           items.push({
             id: String(ch.id),
@@ -1090,6 +1104,7 @@ class SearchIndexer {
         }
         liveIndex++;
         updateProgress((liveIndex / (liveCats.length + 2)) * 30);
+        await stealthDelay(2); // Longer delay between categories
       }
 
       // 3. Fetch VOD Categories
@@ -1104,7 +1119,7 @@ class SearchIndexer {
       for (const cat of movieCats) {
         const catId = cat.id;
         const catName = cat.title || cat.name || "";
-        const movieData = await fetchAllPagesInternal('vod', 'get_ordered_list', { category: catId }, provider);
+        const movieData = await this._fetchAllPagesStealth('vod', 'get_ordered_list', { category: catId }, provider, stealthDelay);
         for (const m of movieData) {
           items.push({
             id: String(m.id),
@@ -1119,14 +1134,15 @@ class SearchIndexer {
         }
         movieIndex++;
         updateProgress(30 + (movieIndex / (movieCats.length + 1)) * 35);
+        await stealthDelay(2);
       }
 
-      // 5. Fetch Series & Episodes
+      // 5. Fetch Series (No deep episode crawling during search for stealth)
       let seriesIndex = 0;
       for (const cat of seriesCats) {
         const catId = cat.id;
         const catName = cat.title || cat.name || "";
-        const seriesData = await fetchAllPagesInternal('vod', 'get_ordered_list', { category: catId }, provider);
+        const seriesData = await this._fetchAllPagesStealth('vod', 'get_ordered_list', { category: catId }, provider, stealthDelay);
         
         for (const s of seriesData) {
           items.push({
@@ -1139,15 +1155,40 @@ class SearchIndexer {
             providerId,
             searchableText: `${s.name} ${catName} series tvshow season`.toLowerCase()
           });
+        }
+        seriesIndex++;
+        updateProgress(65 + (seriesIndex / (seriesCats.length + 1)) * 34);
+        await stealthDelay(2);
+      }
 
-          // Fetch seasons & episodes
-          let seriesSeasons = [];
-          if (PERSISTENT_CACHE_DATA.seriesInfo?.[s.id]?.data?.seasons) {
-             seriesSeasons = PERSISTENT_CACHE_DATA.seriesInfo[s.id].data.seasons;
-          } else {
-             try {
-               const seasonsRes = await portal.request('vod', 'get_ordered_list', { movie_id: s.id }, 0, 10, provider);
-               const seasonsRaw = seasonsRes.js?.data || seasonsRes.js || [];
+      const indexFilePath = path.join(process.cwd(), `search_index_${providerId}.json`);
+      fs.writeFileSync(indexFilePath, JSON.stringify(items));
+      this.status[providerId] = { status: 'complete', progress: 100, itemsCount: items.length };
+      console.log(`SEARCH_INDEX_COMPLETE`, { providerName: provider.name, count: items.length });
+
+    } catch (err) {
+      throw err;
+    }
+  }
+
+  async _fetchAllPagesStealth(type, action, initialParams, provider, stealthDelay) {
+    const allItems = [];
+    let page = 1;
+    const perPage = 100;
+    
+    while (page < 20) { // Limit to 20 pages for stealth
+      const params = { ...initialParams, p: page, perpage: perPage, JsHttpRequest: '1-xml' };
+      const data = await portal.request(type, action, params, 0, 10, provider);
+      const items = data.js?.data || data.js || [];
+      if (!Array.isArray(items) || items.length === 0) break;
+      allItems.push(...items);
+      if (items.length < perPage) break;
+      page++;
+      await stealthDelay();
+    }
+    return allItems;
+  }
+}
                if (Array.isArray(seasonsRaw)) {
                   seriesSeasons = [];
                   for (const sRaw of seasonsRaw) {

@@ -693,6 +693,12 @@ const findCachedVod = (id) => {
 
 app.get('/api/debug/handshake', (req, res) => res.json({ status: 'online', token: portal.token ? 'PRESENT' : 'MISSING' }));
 
+app.post('/api/client-log', (req, res) => {
+  const { message, data } = req.body;
+  console.log(`[CLIENT_LOG] ${message}`, data ? JSON.stringify(data) : '');
+  res.json({ success: true });
+});
+
 // --- PLAYBACK PRIORITY ENDPOINTS ---
 app.post('/api/playback-priority/enter', (req, res) => {
   portal.enterPlaybackPriority();
@@ -939,6 +945,21 @@ app.get('/api/series-info', async (req, res) => {
   }
 });
 
+const restoreStreamId = (url, originalCmd) => {
+  if (!url || typeof url !== 'string') return url;
+  const matchStreamOriginal = String(originalCmd || '').match(/[?&]stream=(\d+)/);
+  const matchStreamResponse = url.match(/[?&]stream=(\d+)/);
+  const streamId = matchStreamResponse ? matchStreamResponse[1] : (matchStreamOriginal ? matchStreamOriginal[1] : null);
+  if (streamId) {
+    const restored = url.replace(/([?&]stream=)(?=&|$)/g, `$1${streamId}`);
+    if (restored !== url) {
+      console.log(`[STREAM_ID_RECOVERY] Restored stream ID ${streamId} in URL: ${url} -> ${restored}`);
+    }
+    return restored;
+  }
+  return url;
+};
+
 app.get('/api/create-link', async (req, res) => {
   const { cmd, type, movie_id } = req.query;
   console.log(`AUDIT: CREATE_LINK_START`, { type, movie_id, cmd });
@@ -1161,9 +1182,10 @@ app.get('/api/create-link', async (req, res) => {
          const result = await tryCreateLink(attempt.cmd, attempt.seriesFlag, attempt.useMovieId);
          
          if (result.url && result.url.length > 0) {
+            const restoredUrl = restoreStreamId(result.url, attempt.cmd || params.cmd);
             PERSISTENT_CACHE_DATA.vodResolution[movie_id] = { fileId, isSeries: attempt.seriesFlag, cmd: attempt.cmd, timestamp: Date.now() };
             saveCache();
-            return res.json({ url: `/api/proxy-stream?url=${encodeURIComponent(result.url.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}` });
+            return res.json({ url: `/api/proxy-stream?url=${encodeURIComponent(restoredUrl.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}&type=vod&movie_id=${encodeURIComponent(movie_id || '')}` });
          }
 
          if (attempt.cmd.startsWith('http') && !attempt.cmd.includes('localhost') && !directUrlFallback) {
@@ -1178,9 +1200,10 @@ app.get('/api/create-link', async (req, res) => {
 
        if (directUrlFallback) {
           console.log("AUDIT: TRYING_DIRECT_URL_BYPASS", { url: directUrlFallback });
+          const restoredFallback = restoreStreamId(directUrlFallback, directUrlAttempt?.cmd || params.cmd);
           PERSISTENT_CACHE_DATA.vodResolution[movie_id] = { fileId, isSeries: directUrlAttempt.seriesFlag, cmd: null, timestamp: Date.now() };
           saveCache();
-          return res.json({ url: `/api/proxy-stream?url=${encodeURIComponent(directUrlFallback.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}` });
+          return res.json({ url: `/api/proxy-stream?url=${encodeURIComponent(restoredFallback.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}&type=vod&movie_id=${encodeURIComponent(movie_id || '')}` });
        }
 
        throw new Error('nothing_to_play');
@@ -1188,32 +1211,36 @@ app.get('/api/create-link', async (req, res) => {
 
     // Removed REWRITING_ITV_CMD_FOR_PORTAL logic to restore native portal command path
     
-    const data = await portal.request(type || 'itv', 'create_link', params, 0, 100);
+    let data = await portal.request(type || 'itv', 'create_link', params, 0, 100);
     console.log(`CREATE_LINK_RAW_RESPONSE`, { data });
 
     let url = data.js?.cmd || data.cmd || data.js || '';
     if (typeof url !== 'string') throw new Error(data.js?.error || data.error || 'Link fault');
+
+    // Force re-authorization if we detect an expired session (indicated by missing stream ID when original had it)
+    const originalCmd = req.query.cmd || '';
+    const matchStreamOriginal = String(originalCmd).match(/[?&]stream=(\d+)/);
+    const matchStreamResponse = String(url).match(/[?&]stream=(\d+)/);
+    
+    if (matchStreamOriginal && !matchStreamResponse) {
+       console.warn("AUDIT: DETECTED_EXPIRED_SESSION_IN_CREATE_LINK (stream ID missing). Re-authorizing and retrying...");
+       await portal.authorize(true, 100, 'create-link-expired-session', provider);
+       
+       data = await portal.request(type || 'itv', 'create_link', params, 0, 100);
+       console.log(`CREATE_LINK_RETRY_RAW_RESPONSE`, { data });
+       
+       url = data.js?.cmd || data.cmd || data.js || '';
+       if (typeof url !== 'string') throw new Error(data.js?.error || data.error || 'Link fault');
+    }
     
     console.log(`PLAYBACK_URL_STAGE_1_CREATE_LINK_RESPONSE`, { url });
 
     // Ensure we don't lose the stream ID if it was in the original request but missing in the response
-    const originalCmd = req.query.cmd || '';
-    const matchStreamOriginal = String(originalCmd).match(/[?&]stream=(\d+)/);
-    const matchStreamResponse = String(url).match(/[?&]stream=(\d+)/);
-    const streamId = matchStreamResponse ? matchStreamResponse[1] : (matchStreamOriginal ? matchStreamOriginal[1] : null);
+    const restoredUrl = restoreStreamId(url, originalCmd);
     
-    console.log(`STREAM_ID_EXTRACTED`, { streamId, fromResponse: !!matchStreamResponse, fromOriginal: !!matchStreamOriginal });
+    let finalProxyUrl = restoredUrl ? `/api/proxy-stream?url=${encodeURIComponent(restoredUrl.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}&type=${encodeURIComponent(type || 'itv')}&cmd=${encodeURIComponent(originalCmd || '')}` : '';
 
-    let finalProxyUrl = url ? `/api/proxy-stream?url=${encodeURIComponent(url.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}` : '';
-    
-    // Recovery: If the URL has stream= but it's empty, and we have a streamId, fix it
-    if (finalProxyUrl.includes('stream=&') && streamId) {
-        finalProxyUrl = finalProxyUrl.replace('stream=&', `stream=${streamId}&`);
-    } else if (finalProxyUrl.endsWith('stream=') && streamId) {
-        finalProxyUrl = finalProxyUrl + streamId;
-    }
-
-    console.log(`PROXY_STREAM_FINAL_URL`, { finalProxyUrl });
+    console.log("PROXY_STREAM_FINAL_URL", { finalProxyUrl });
 
     res.json({ url: finalProxyUrl });
   } catch (error) { 
@@ -1245,7 +1272,8 @@ app.get('/api/episode-link', async (req, res) => {
       const d = await portal.request('vod', 'create_link', lp, 0, 100);
       const fastUrl = d.js?.cmd || d.cmd || (typeof d.js === 'string' ? d.js : '');
       if (fastUrl) {
-        return res.json({ ok: true, url: `/api/proxy-stream?url=${encodeURIComponent(fastUrl.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}` });
+        const restoredUrl = restoreStreamId(fastUrl, cachedResolution.cmd);
+        return res.json({ ok: true, url: `/api/proxy-stream?url=${encodeURIComponent(restoredUrl.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}&type=episode&series_id=${encodeURIComponent(series_id || '')}&season_id=${encodeURIComponent(season_id || '')}&episode_id=${encodeURIComponent(episode_id || '')}` });
       }
       // Fast-path failed — fall through to full resolution below
       console.warn('AUDIT: EPISODE_RESOLUTION_CACHE_STALE, re-resolving', { episode_id });
@@ -1373,10 +1401,11 @@ app.get('/api/episode-link', async (req, res) => {
       const result = await tryCreateLink(attempt.cmd, attempt.seriesFlag, attempt.extraParams);
       
       if (result.url && result.url.length > 0) {
+        const restoredUrl = restoreStreamId(result.url, attempt.cmd);
         if (!PERSISTENT_CACHE_DATA.vodResolution) PERSISTENT_CACHE_DATA.vodResolution = {};
         PERSISTENT_CACHE_DATA.vodResolution[episode_id] = { fileId: fileId, isSeries: attempt.seriesFlag, cmd: attempt.cmd, timestamp: Date.now() };
         saveCache();
-        return res.json({ ok: true, url: `/api/proxy-stream?url=${encodeURIComponent(result.url.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}` });
+        return res.json({ ok: true, url: `/api/proxy-stream?url=${encodeURIComponent(restoredUrl.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}&type=episode&series_id=${encodeURIComponent(series_id || '')}&season_id=${encodeURIComponent(season_id || '')}&episode_id=${encodeURIComponent(episode_id || '')}` });
       }
 
       if (attempt.cmd.startsWith('http') && !attempt.cmd.includes('localhost') && !directUrlFallback) {
@@ -1391,10 +1420,11 @@ app.get('/api/episode-link', async (req, res) => {
 
     if (directUrlFallback) {
       console.log("AUDIT: TRYING_DIRECT_URL_BYPASS_EPISODE", { url: directUrlFallback });
+      const restoredFallback = restoreStreamId(directUrlFallback, directUrlAttempt?.cmd);
       if (!PERSISTENT_CACHE_DATA.vodResolution) PERSISTENT_CACHE_DATA.vodResolution = {};
       PERSISTENT_CACHE_DATA.vodResolution[episode_id] = { fileId: fileId, isSeries: directUrlAttempt.seriesFlag, cmd: null, timestamp: Date.now() };
       saveCache();
-      return res.json({ ok: true, url: `/api/proxy-stream?url=${encodeURIComponent(directUrlFallback.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}` });
+      return res.json({ ok: true, url: `/api/proxy-stream?url=${encodeURIComponent(restoredFallback.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}&type=episode&series_id=${encodeURIComponent(series_id || '')}&season_id=${encodeURIComponent(season_id || '')}&episode_id=${encodeURIComponent(episode_id || '')}` });
     }
 
     throw new Error('nothing_to_play');
@@ -1575,7 +1605,7 @@ const findProviderForUrl = (streamUrl, providerIdParam = null) => {
 };
 
 app.get('/api/proxy-stream', async (req, res) => {
-  const streamUrl = req.query.url;
+  let streamUrl = req.query.url;
   if (!streamUrl) return res.status(400).send('URL required');
   
   try {
@@ -1585,7 +1615,8 @@ app.get('/api/proxy-stream', async (req, res) => {
     
     const tryFetch = async (headers, useTokenInUrl) => {
       let finalUrl = streamUrl;
-      if (useTokenInUrl && !finalUrl.includes('token=') && usedToken) {
+      const hasTokenParam = /[?&]token=/.test(finalUrl);
+      if (useTokenInUrl && !hasTokenParam && usedToken) {
         finalUrl += (finalUrl.includes('?') ? '&' : '?') + `token=${usedToken}`;
       }
 
@@ -1610,6 +1641,64 @@ app.get('/api/proxy-stream', async (req, res) => {
     
     // Attempt 1: Standard STB headers
     let response = await tryFetch(baseStbHeaders, false);
+
+    // Immediate re-auth if first attempt fails with auth error (401/403/458)
+    if ((response.status === 403 || response.status === 401 || response.status === 458) && provider) {
+       console.log("AUDIT: TRIGGERING_PROACTIVE_REAUTH_ON_PROXY_FAILURE", { status: response.status, providerName: provider.name });
+       const newToken = await portal.authorize(true, 20, 'proxy-failure-auth', provider);
+       usedToken = newToken;
+
+       // If we have original request parameters to regenerate a fresh play token, do it!
+       const reqType = req.query.type;
+       if (reqType) {
+         console.log(`[PROXY_REGEN] Attempting to regenerate fresh link for type: ${reqType}`);
+         let regenUrl = '';
+         try {
+           if (reqType === 'episode') {
+             const { series_id, season_id, episode_id } = req.query;
+             const regenRes = await axios.get(`http://localhost:${PORT}/api/episode-link`, {
+               params: { series_id, season_id, episode_id },
+               timeout: 15000
+             });
+             if (regenRes.data && regenRes.data.ok && regenRes.data.url) {
+               regenUrl = regenRes.data.url;
+             }
+           } else if (reqType === 'vod') {
+             const { movie_id } = req.query;
+             const regenRes = await axios.get(`http://localhost:${PORT}/api/create-link`, {
+               params: { type: 'vod', movie_id },
+               timeout: 15000
+             });
+             if (regenRes.data && regenRes.data.url) {
+               regenUrl = regenRes.data.url;
+             }
+           } else if (reqType === 'itv') {
+             const { cmd: originalCmd } = req.query;
+             const regenRes = await axios.get(`http://localhost:${PORT}/api/create-link`, {
+               params: { type: 'itv', cmd: originalCmd },
+               timeout: 15000
+             });
+             if (regenRes.data && regenRes.data.url) {
+               regenUrl = regenRes.data.url;
+             }
+           }
+
+           if (regenUrl) {
+             const parsedRegen = new URL(regenUrl, `http://localhost:${PORT}`);
+             const freshStreamUrl = parsedRegen.searchParams.get('url');
+             if (freshStreamUrl) {
+               console.log(`[PROXY_REGEN] Successfully regenerated fresh stream URL: ${freshStreamUrl}`);
+               streamUrl = freshStreamUrl;
+             }
+           }
+         } catch (regenErr) {
+           console.error('[PROXY_REGEN] Error regenerating fresh link:', regenErr.message);
+         }
+       }
+
+       const freshHeaders = getHeaders({ token: newToken, isCdn: true }, provider);
+       response = await tryFetch(freshHeaders, false);
+    }
 
     // Attempt 2: Standard STB headers WITH token in URL
     if (response.status === 403 || response.status === 401 || response.status === 458) {
@@ -1644,22 +1733,7 @@ app.get('/api/proxy-stream', async (req, res) => {
 
     if (response.status >= 400) {
        console.error(`AUDIT: PROXY_STREAM_FINAL_FAILURE`, { status: response.status });
-       // If we failed with 403/401/458 after all retries, it's likely a token expiry issue
-       if ((response.status === 403 || response.status === 401 || response.status === 458) && provider) {
-          console.log("AUDIT: TRIGGERING_PROACTIVE_REAUTH_ON_PROXY_FAILURE", { status: response.status, providerName: provider.name });
-          const newToken = await portal.authorize(true, 20, 'proxy-failure-auth', provider);
-          // RETRY ONCE with fresh token!
-          console.log("AUDIT: RETRYING_PROXY_STREAM_WITH_FRESH_TOKEN");
-          const freshHeaders = getHeaders({ token: newToken, isCdn: true }, provider);
-          response = await tryFetch(freshHeaders, true); // try with token in URL by default on retry
-          if (response.status < 400) {
-             console.log("AUDIT: PROXY_STREAM_RETRY_SUCCESS");
-          } else {
-             return res.status(response.status).send(`Upstream: ${response.status}`);
-          }
-       } else {
-          return res.status(response.status).send(`Upstream: ${response.status}`);
-       }
+       return res.status(response.status).send(`Upstream: ${response.status}`);
     }
 
     const contentType = response.headers['content-type'] || '';

@@ -19,7 +19,15 @@ class PlayerService {
   log(message, data = null) {
     const timestamp = new Date().toISOString().split('T')[1].split('Z')[0];
     console.log(`[PlayerService][${timestamp}] ${message}`, data || "");
+    try {
+      fetch('/api/client-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: `[PlayerService][${timestamp}] ${message}`, data: data ? (data instanceof Error ? data.message : data) : undefined })
+      }).catch(() => {});
+    } catch (e) {}
   }
+
 
   clearWatchdog() {
     if (this.watchdogTimer) {
@@ -119,8 +127,11 @@ class PlayerService {
       }
 
       const decodedUrl = decodeURIComponent(url);
-      const isTs = decodedUrl.includes('extension=ts') || decodedUrl.includes('.ts') || decodedUrl.includes('type=itv');
+      const isM3u8 = decodedUrl.toLowerCase().includes('.m3u8');
+      const isTs = (decodedUrl.includes('extension=ts') || decodedUrl.includes('.ts') || decodedUrl.includes('type=itv')) && !isM3u8;
       let engine = options.engine || 'auto';
+      
+      this.log(`HTML5 Play Diagnostic: window.mpegts=${!!window.mpegts}, mpegts.isSupported=${window.mpegts ? window.mpegts.isSupported() : 'N/A'}, window.Hls=${!!window.Hls}, Hls.isSupported=${window.Hls ? window.Hls.isSupported() : 'N/A'}, isTs=${isTs}, enginePreference=${engine}`);
       if (isTs && window.mpegts && window.mpegts.isSupported()) {
         this.log("Forcing mpegts engine for TS stream");
         engine = 'mpegts';
@@ -152,8 +163,10 @@ class PlayerService {
           isLive: true,
           url: url
         }, {
-          enableStashBuffer: false,
-          liveBufferLatencyChasing: true
+          enableStashBuffer: true,
+          stashInitialSize: 128 * 1024,
+          liveBufferLatencyChasing: false,
+          liveBufferLatencyChasingOnPaused: false
         });
 
         this.mpegtsPlayer.attachMediaElement(this.videoElement);

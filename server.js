@@ -1186,19 +1186,14 @@ app.get('/api/create-link', async (req, res) => {
        throw new Error('nothing_to_play');
     }
 
-    if (type !== 'vod' && params.cmd) {
-      const matchStream = String(params.cmd).match(/[?&]stream=(\d+)/);
-      const matchCh = String(params.cmd).match(/\/ch\/(\d+)/);
-      const streamId = matchStream ? matchStream[1] : (matchCh ? matchCh[1] : null);
-      if (streamId) {
-        params.cmd = `ffrt http://localhost/ch/${streamId}`;
-        console.log(`AUDIT: REWRITING_ITV_CMD_FOR_PORTAL`, { original: req.query.cmd, rewritten: params.cmd });
-      }
-    }
-
+    // Removed REWRITING_ITV_CMD_FOR_PORTAL logic to restore native portal command path
+    
     const data = await portal.request(type || 'itv', 'create_link', params, 0, 100);
     let url = data.js?.cmd || data.cmd || data.js || '';
     if (typeof url !== 'string') throw new Error(data.js?.error || data.error || 'Link fault');
+    
+    console.log(`PLAYBACK_URL_STAGE_1_CREATE_LINK_RESPONSE`, { url });
+
      res.json({ url: url ? `/api/proxy-stream?url=${encodeURIComponent(url.replace(/^(ffrt|auto|ffmpeg)\s+/, ''))}${providerId ? `&providerId=${providerId}` : ''}` : '' });
   } catch (error) { 
     console.error(`AUDIT: CREATE_LINK_FAILED`, error.message);
@@ -1573,15 +1568,7 @@ app.get('/api/proxy-stream', async (req, res) => {
         finalUrl += (finalUrl.includes('?') ? '&' : '?') + `token=${usedToken}`;
       }
 
-      console.log(`AUDIT: PROXY_REQUEST`, { 
-        url: finalUrl.substring(0, 80) + '...', 
-        headers: {
-          'User-Agent': headers['User-Agent']?.substring(0, 30) + '...',
-          'X-STB-MAC': headers['X-STB-MAC'] ? 'PRESENT' : 'MISSING',
-          'Cookie': headers['Cookie'] ? 'PRESENT' : 'MISSING',
-          'Referer': headers['Referer'] ? 'PRESENT' : 'MISSING'
-        }
-      });
+      console.log(`PLAYBACK_URL_STAGE_2_PROXY_REQUEST_URL`, { url: finalUrl });
       
       const resp = await axios({ 
         method: 'get', 
@@ -1592,7 +1579,7 @@ app.get('/api/proxy-stream', async (req, res) => {
         validateStatus: false 
       });
 
-      console.log(`AUDIT: PROXY_RESPONSE_STATUS`, { status: resp.status, url: finalUrl.substring(0, 40) + '...' });
+      console.log(`PLAYBACK_URL_STAGE_3_PROXY_RESPONSE_STATUS`, { status: resp.status });
       return resp;
     };
 
@@ -1604,22 +1591,22 @@ app.get('/api/proxy-stream', async (req, res) => {
     let response = await tryFetch(baseStbHeaders, false);
 
     // Attempt 2: Standard STB headers WITH token in URL
-    if (response.status === 403 || response.status === 401) {
-      console.warn(`AUDIT: PROXY_STREAM_403_TRYING_WITH_TOKEN`);
+    if (response.status === 403 || response.status === 401 || response.status === 458) {
+      console.warn(`AUDIT: PROXY_STREAM_AUTH_FAIL_TRYING_WITH_TOKEN`, { status: response.status });
       response = await tryFetch(baseStbHeaders, true);
     }
 
     // Attempt 3: Bare MAG User-Agent (No MAC, No Cookie, No Referer)
     const magUA = 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3';
-    if (response.status === 403 || response.status === 401) {
-       console.warn(`AUDIT: PROXY_STREAM_403_TRYING_BARE_MAG_UA`);
+    if (response.status === 403 || response.status === 401 || response.status === 458) {
+       console.warn(`AUDIT: PROXY_STREAM_AUTH_FAIL_TRYING_BARE_MAG_UA`, { status: response.status });
        const bareMagHeaders = { 'User-Agent': (provider && provider.STB_USER_AGENT) || magUA };
        response = await tryFetch(bareMagHeaders, false);
     }
 
     // Attempt 4: Rotate UA to Chrome, but PRESERVE STB IDENTITY (MAC, Cookies, Referer)
-    if (response.status === 403 || response.status === 401) {
-      console.warn(`AUDIT: PROXY_STREAM_403_TRYING_CHROME_UA_PRESERVE_STB`);
+    if (response.status === 403 || response.status === 401 || response.status === 458) {
+      console.warn(`AUDIT: PROXY_STREAM_AUTH_FAIL_TRYING_CHROME_UA_PRESERVE_STB`, { status: response.status });
       const chromeStbHeaders = { 
         ...baseStbHeaders,
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
@@ -1628,18 +1615,18 @@ app.get('/api/proxy-stream', async (req, res) => {
     }
     
     // Attempt 5: Last resort — Bare minimum Chrome headers
-    if (response.status === 403 || response.status === 401) {
-       console.warn(`AUDIT: PROXY_STREAM_403_TRYING_BARE`);
+    if (response.status === 403 || response.status === 401 || response.status === 458) {
+       console.warn(`AUDIT: PROXY_STREAM_AUTH_FAIL_TRYING_BARE`, { status: response.status });
        const bareHeaders = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36' };
        response = await tryFetch(bareHeaders, false);
     }
 
     if (response.status >= 400) {
        console.error(`AUDIT: PROXY_STREAM_FINAL_FAILURE`, { status: response.status });
-       // If we failed with 403/401 after all retries, it's likely a token expiry issue
-       if ((response.status === 403 || response.status === 401) && provider) {
-          console.log("AUDIT: TRIGGERING_PROACTIVE_REAUTH_ON_PROXY_FAILURE", { providerName: provider.name });
-          const newToken = await portal.authorize(true, 20, 'proxy-failure-403', provider);
+       // If we failed with 403/401/458 after all retries, it's likely a token expiry issue
+       if ((response.status === 403 || response.status === 401 || response.status === 458) && provider) {
+          console.log("AUDIT: TRIGGERING_PROACTIVE_REAUTH_ON_PROXY_FAILURE", { status: response.status, providerName: provider.name });
+          const newToken = await portal.authorize(true, 20, 'proxy-failure-auth', provider);
           // RETRY ONCE with fresh token!
           console.log("AUDIT: RETRYING_PROXY_STREAM_WITH_FRESH_TOKEN");
           const freshHeaders = getHeaders({ token: newToken, isCdn: true }, provider);

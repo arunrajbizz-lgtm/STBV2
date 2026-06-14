@@ -14,34 +14,6 @@ import os from 'os';
 const PROXY_URL = process.env.PROXY_URL || 'http://localhost:40000';
 const CLOUDFLARE_WORKER_URL = '129.154.34.222';
 let proxyAgent = null;
-let vpnAgent = null;
-let vpnHttpsAgent = null;
-
-// Smart Interface Detection (Indian VPN)
-const detectVpnInterface = () => {
-    const interfaces = os.networkInterfaces();
-    const vpnPrefixes = ['tun', 'utun', 'wg', 'tap', 'ppp', 'tailscale', 'vpn', 'wintun'];
-    
-    for (const iface in interfaces) {
-        const lowerIface = iface.toLowerCase();
-        if (vpnPrefixes.some(prefix => lowerIface.startsWith(prefix))) {
-            const addr = interfaces[iface].find(a => a.family === 'IPv4');
-            if (addr) {
-                console.log(`AUDIT: INDIAN_VPN_DETECTED`, { interface: iface, ip: addr.address });
-                // Bind Axios to the VPN IP so it uses the Indian tunnel
-                vpnAgent = new http.Agent({ localAddress: addr.address, keepAlive: true });
-                vpnHttpsAgent = new https.Agent({ localAddress: addr.address, keepAlive: true, rejectUnauthorized: false });
-                return addr.address;
-            }
-        }
-    }
-    
-    console.log(`AUDIT: NO_INDIAN_VPN_TUNNEL_FOUND`, { 
-        availableInterfaces: Object.keys(interfaces) 
-    });
-    return null;
-};
-const vpnLocalIp = detectVpnInterface();
 
 // Smart Proxy Check: Only enable if a local proxy (WARP) is reachable
 const checkProxy = async () => {
@@ -336,17 +308,7 @@ class PortalClient {
     // PER-PROVIDER ROUTING LOGIC
     // Determine if a provider should use the VPN proxy, Bridge, or a direct connection
     this.getAgent = (provider) => {
-       const name = (provider?.name || '').toUpperCase();
-       const url = (provider?.PORTAL_URL || '').toLowerCase();
-       const isStrict = name.includes('JIO') || name.includes('AIRTEL') || url.includes('jiotv') || url.includes('airtel');
-
-       // Priority 1: If we have an Indian VPN (tun0), use it for ALL providers (Best Performance for Seoul VM)
-       if (vpnAgent) {
-           console.log(`[ROUTING] Indian VPN (tun0) enabled for ${name}`);
-           return vpnAgent;
-       }
-
-       // Priority 2: Use local proxyAgent (WARP) as fallback if available
+       // Use local proxyAgent (WARP) as fallback if available
        if (proxyAgent) return proxyAgent;
        
        return null; 

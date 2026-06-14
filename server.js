@@ -8,13 +8,13 @@ import http from 'http';
 import https from 'https';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
-// --- PROXY CONFIGURATION (Cloudflare WARP or Local Proxy) ---
-// Set USE_PROXY_FOR_PORTAL=true and PROXY_URL=http://localhost:40000 in .env if needed
+// --- PROXY CONFIGURATION ---
+// Local proxy (like Cloudflare WARP on port 40000) is detected automatically.
+// For Indian VMs, direct connection is preferred for speed.
 const PROXY_URL = process.env.PROXY_URL || 'http://localhost:40000';
-const CLOUDFLARE_WORKER_URL = 'https://poomani.arunrajbizz.workers.dev/';
 let proxyAgent = null;
 
-// Smart Proxy Check: Only enable if PROXY_URL is reachable
+// Smart Proxy Check: Only enable if a local proxy (WARP) is reachable
 const checkProxy = async () => {
     try {
         const url = new URL(PROXY_URL);
@@ -29,10 +29,10 @@ const checkProxy = async () => {
         req.end();
         
         proxyAgent = new HttpsProxyAgent(PROXY_URL);
-        console.log(`AUDIT: PROXY_DETECTED_AND_ENABLED`, { url: PROXY_URL });
+        console.log(`AUDIT: LOCAL_PROXY_DETECTED`, { url: PROXY_URL });
     } catch (e) {
         proxyAgent = null;
-        console.log(`AUDIT: NO_PROXY_DETECTED_USING_DIRECT_CONNECTION`);
+        console.log(`AUDIT: RUNNING_DIRECT_NO_PROXY_DETECTED`);
     }
 };
 checkProxy();

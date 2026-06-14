@@ -326,8 +326,8 @@ class PortalClient {
         
         // ROUTE STRICT PROVIDERS THROUGH CLOUDFLARE BRIDGE
         if (name.includes('JIO') || name.includes('AIRTEL') || url.includes('jiotv') || url.includes('airtel')) {
-            console.log(`[BRIDGE] Routing ${name} through Cloudflare Worker`);
-            return `${CLOUDFLARE_WORKER_URL}?url=${encodeURIComponent(originalUrl)}`;
+            // Note: Cloudflare worker is now smart enough to merge query params from its own URL
+            return CLOUDFLARE_WORKER_URL + '?url=' + encodeURIComponent(originalUrl);
         }
         
         return originalUrl;

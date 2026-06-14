@@ -11,6 +11,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 // --- PROXY CONFIGURATION (Cloudflare WARP or Local Proxy) ---
 // Set USE_PROXY_FOR_PORTAL=true and PROXY_URL=http://localhost:40000 in .env if needed
 const PROXY_URL = process.env.PROXY_URL || 'http://localhost:40000';
+const CLOUDFLARE_WORKER_URL = 'https://poomani.arunrajbizz.workers.dev/';
 let proxyAgent = null;
 
 // Smart Proxy Check: Only enable if PROXY_URL is reachable
@@ -305,25 +306,31 @@ class PortalClient {
     // PER-PROVIDER ROUTING LOGIC
     // Determine if a provider should use the VPN proxy or a direct connection
     this.getAgent = (provider) => {
-       if (!proxyAgent) return null; // No VPN available
+       if (!proxyAgent) return null; // No local proxy available
        
        const name = (provider?.name || '').toUpperCase();
        const url = (provider?.PORTAL_URL || '').toLowerCase();
        
        // SBH is fast and trusted - use direct connection to avoid VPN overhead/latency
        if (name.includes('SBH') || url.includes('sbhgoldpro')) {
-           console.log(`[ROUTING] Direct connection for SBH`);
            return null; 
        }
        
-       // JIOTV and AIRTEL are blocked on Oracle ASN - MUST use Proxy (WARP)
-       if (name.includes('JIO') || name.includes('AIRTEL') || url.includes('jiotv') || url.includes('airtel')) {
-           console.log(`[ROUTING] Proxy (WARP) enabled for ${name}`);
-           return proxyAgent;
-       }
-       
-       // Default: use proxy if available (safest for unknown providers)
+       // Default: use local proxyAgent (WARP) if available
        return proxyAgent;
+    };
+
+    this.getPortalUrl = (provider, originalUrl) => {
+        const name = (provider?.name || '').toUpperCase();
+        const url = (originalUrl || '').toLowerCase();
+        
+        // ROUTE STRICT PROVIDERS THROUGH CLOUDFLARE BRIDGE
+        if (name.includes('JIO') || name.includes('AIRTEL') || url.includes('jiotv') || url.includes('airtel')) {
+            console.log(`[BRIDGE] Routing ${name} through Cloudflare Worker`);
+            return `${CLOUDFLARE_WORKER_URL}?url=${encodeURIComponent(originalUrl)}`;
+        }
+        
+        return originalUrl;
     };
 
     // Load existing token from cache if present for active provider
@@ -454,10 +461,10 @@ class PortalClient {
         
         while (attempts < 3) {
           try {
-            const portalUrl = normalizePortalUrl(provider.PORTAL_URL);
+            const portalUrl = this.getPortalUrl(provider, normalizePortalUrl(provider.PORTAL_URL));
             const authParams = this._getAuthParams(provider);
             
-            console.log("AUDIT: AUTH_STEP_1_HANDSHAKE", { providerName: provider.name, source, attempt: attempts, proxy: !!agent });
+            console.log("AUDIT: AUTH_STEP_1_HANDSHAKE", { providerName: provider.name, source, attempt: attempts, proxy: !!agent, bridge: portalUrl.includes('workers.dev') });
             const response = await axios.post(portalUrl, null, {
               params: { type: 'stb', action: 'handshake', token: '', ...authParams, JsHttpRequest: '1-xml' },
               headers: getHeaders({ token: '' }, provider),
@@ -583,7 +590,8 @@ class PortalClient {
 
       while (true) {
         try {
-          console.log(`AUDIT: PORTAL_REQUEST_EXECUTE`, { providerName: provider.name, type, action, priority, retry: currentRetry, proxy: !!agent });
+          const portalUrl = this.getPortalUrl(provider, normalizePortalUrl(provider.PORTAL_URL));
+          console.log(`AUDIT: PORTAL_REQUEST_EXECUTE`, { providerName: provider.name, type, action, priority, retry: currentRetry, proxy: !!agent, bridge: portalUrl.includes('workers.dev') });
           const usedToken = await this.authorize(false, priority + 1, `${type}:${action}`, provider);
           const authParams = this._getAuthParams(provider);
           
@@ -1968,6 +1976,13 @@ app.get('/api/proxy-stream', async (req, res) => {
       const hasTokenParam = /[?&]token=/.test(finalUrl);
       if (useTokenInUrl && !hasTokenParam && usedToken) {
         finalUrl += (finalUrl.includes('?') ? '&' : '?') + `token=${usedToken}`;
+      }
+
+      // BRIDGE VIDEO STREAM THROUGH CLOUDFLARE WORKER FOR STRICT PROVIDERS
+      const name = (provider?.name || '').toUpperCase();
+      if (name.includes('JIO') || name.includes('AIRTEL') || finalUrl.includes('jiotv') || finalUrl.includes('airtel')) {
+          console.log(`[STREAM_BRIDGE] Routing ${name} stream through Cloudflare Worker`);
+          finalUrl = `${CLOUDFLARE_WORKER_URL}?url=${encodeURIComponent(finalUrl)}`;
       }
 
       console.log(`PLAYBACK_URL_STAGE_2_PROXY_REQUEST_URL`, { url: finalUrl });

@@ -308,7 +308,15 @@ class PortalClient {
     // PER-PROVIDER ROUTING LOGIC
     // Determine if a provider should use the VPN proxy, Bridge, or a direct connection
     this.getAgent = (provider) => {
-       // Use local proxyAgent (WARP) as fallback if available
+       const name = (provider?.name || '').toUpperCase();
+       const url = (provider?.PORTAL_URL || '').toLowerCase();
+       
+       // SBH blocks Cloudflare/WARP. Use direct connection for SBH.
+       if (name.includes('SBH') || url.includes('sbhgold')) {
+           return null;
+       }
+
+       // Use local proxyAgent (WARP) as fallback for others if available
        if (proxyAgent) return proxyAgent;
        
        return null; 
@@ -318,9 +326,14 @@ class PortalClient {
         const name = (provider?.name || '').toUpperCase();
         const url = (originalUrl || '').toLowerCase();
         
+        // SBH blocks Cloudflare Bridge. Use direct portal URL.
+        if (name.includes('SBH') || url.includes('sbhgold')) {
+            return originalUrl;
+        }
+
         // ROUTE STRICT PROVIDERS THROUGH CLOUDFLARE BRIDGE
-        if (name.includes('JIO') || name.includes('AIRTEL') || name.includes('SBH') || 
-            url.includes('jiotv') || url.includes('airtel') || url.includes('sbhgold')) {
+        if (name.includes('JIO') || name.includes('AIRTEL') || 
+            url.includes('jiotv') || url.includes('airtel')) {
             // Note: Cloudflare worker is now smart enough to merge query params from its own URL
             return CLOUDFLARE_WORKER_URL + '?url=' + encodeURIComponent(originalUrl);
         }

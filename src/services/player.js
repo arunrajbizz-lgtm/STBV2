@@ -616,9 +616,17 @@ class PlayerService {
   }
 
   getAudioTracks() {
+    this.log("getAudioTracks called", { tizen: this.isTizen, hls: !!this.hls, mpegts: !!this.mpegtsPlayer });
+    
     if (this.isTizen && window.webapis.avplay) {
       try {
         const tracks = window.webapis.avplay.getTotalTrackInfo();
+        const currentStreams = window.webapis.avplay.getCurrentStreamInfo();
+        const currentAudio = currentStreams.find(s => s.type === "AUDIO");
+        const activeIndex = currentAudio ? currentAudio.index : -1;
+        
+        this.log("AVPlay tracks found", { total: tracks.length, audio: tracks.filter(t => t.type === "AUDIO").length, activeIndex });
+
         return tracks
           .filter(t => t.type === "AUDIO")
           .map(t => {
@@ -631,25 +639,59 @@ class PlayerService {
             }
             return {
               index: t.index,
-              language: lang ? lang.toUpperCase() : `Audio Track ${t.index}`
+              language: lang ? lang.toUpperCase() : `Audio Track ${t.index}`,
+              active: t.index === activeIndex
             };
           });
       } catch (e) { return []; }
     } else if (this.hls) {
       try {
+        const activeIndex = this.hls.audioTrack;
+        this.log("HLS tracks found", { count: this.hls.audioTracks.length, activeIndex });
         return this.hls.audioTracks.map((t, idx) => ({
           index: idx,
-          language: t.name || t.lang || `Audio Track ${idx + 1}`
+          language: t.name || t.lang || `Audio Track ${idx + 1}`,
+          active: idx === activeIndex
         }));
+      } catch (e) { return []; }
+    } else if (this.mpegtsPlayer) {
+      try {
+        const tracks = [];
+        const activeIndex = (typeof this.mpegtsPlayer.audioTrack === 'number') ? this.mpegtsPlayer.audioTrack : -1;
+        
+        if (this.mpegtsPlayer.audioTracks) {
+           for (let i = 0; i < this.mpegtsPlayer.audioTracks.length; i++) {
+              const t = this.mpegtsPlayer.audioTracks[i];
+              tracks.push({ 
+                index: i, 
+                language: t.language || t.label || `Audio Track ${i + 1}`,
+                active: i === activeIndex
+              });
+           }
+        }
+        if (tracks.length === 0 && this.videoElement && this.videoElement.audioTracks) {
+           for (let i = 0; i < this.videoElement.audioTracks.length; i++) {
+              const t = this.videoElement.audioTracks[i];
+              tracks.push({ 
+                index: i, 
+                language: t.label || t.language || `Audio Track ${i + 1}`,
+                active: t.enabled
+              });
+           }
+        }
+        this.log("MPEGTS tracks found", { count: tracks.length, activeIndex });
+        return tracks;
       } catch (e) { return []; }
     } else if (this.videoElement && this.videoElement.audioTracks) {
       try {
         const tracks = [];
+        this.log("HTML5 tracks found", { count: this.videoElement.audioTracks.length });
         for (let i = 0; i < this.videoElement.audioTracks.length; i++) {
           const t = this.videoElement.audioTracks[i];
           tracks.push({
             index: i,
-            language: t.label || t.language || `Audio Track ${i + 1}`
+            language: t.label || t.language || `Audio Track ${i + 1}`,
+            active: t.enabled
           });
         }
         return tracks;
@@ -659,11 +701,21 @@ class PlayerService {
   }
 
   setAudioTrack(index) {
-    this.log(`Select Audio Track: index=${index}`);
+    this.log(`Select Audio Track: index=${index}`, { hls: !!this.hls, mpegts: !!this.mpegtsPlayer });
     if (this.isTizen && window.webapis.avplay) {
       try { window.webapis.avplay.setSelectTrack("AUDIO", index); } catch (e) { this.log("AVPlay Select Audio Track Error", e.message); }
     } else if (this.hls) {
       try { this.hls.audioTrack = index; } catch (e) {}
+    } else if (this.mpegtsPlayer) {
+      try {
+        if (typeof this.mpegtsPlayer.setAudioTrack === 'function') {
+           this.mpegtsPlayer.setAudioTrack(index);
+        } else if (this.videoElement && this.videoElement.audioTracks) {
+           for (let i = 0; i < this.videoElement.audioTracks.length; i++) {
+              this.videoElement.audioTracks[i].enabled = (i === index);
+           }
+        }
+      } catch (e) {}
     } else if (this.videoElement && this.videoElement.audioTracks) {
       try {
         for (let i = 0; i < this.videoElement.audioTracks.length; i++) {
@@ -677,6 +729,10 @@ class PlayerService {
     if (this.isTizen && window.webapis.avplay) {
       try {
         const tracks = window.webapis.avplay.getTotalTrackInfo();
+        const currentStreams = window.webapis.avplay.getCurrentStreamInfo();
+        const currentSub = currentStreams.find(s => s.type === "SUBTITLE");
+        const activeIndex = currentSub ? currentSub.index : -1;
+
         const subtitleTracks = tracks
           .filter(t => t.type === "SUBTITLE")
           .map(t => {
@@ -689,19 +745,22 @@ class PlayerService {
             }
             return {
               index: t.index,
-              language: lang ? lang.toUpperCase() : `Subtitle ${t.index}`
+              language: lang ? lang.toUpperCase() : `Subtitle ${t.index}`,
+              active: t.index === activeIndex
             };
           });
-        subtitleTracks.unshift({ index: -1, language: 'Off' });
+        subtitleTracks.unshift({ index: -1, language: 'Off', active: activeIndex === -1 });
         return subtitleTracks;
       } catch (e) { return []; }
     } else if (this.hls) {
       try {
+        const activeIndex = this.hls.subtitleTrack;
         const tracks = this.hls.subtitleTracks.map((t, idx) => ({
           index: idx,
-          language: t.name || t.lang || `Subtitle ${idx + 1}`
+          language: t.name || t.lang || `Subtitle ${idx + 1}`,
+          active: idx === activeIndex
         }));
-        tracks.unshift({ index: -1, language: 'Off' });
+        tracks.unshift({ index: -1, language: 'Off', active: activeIndex === -1 });
         return tracks;
       } catch (e) { return []; }
     } else if (this.videoElement && this.videoElement.textTracks) {
@@ -711,10 +770,12 @@ class PlayerService {
         textTracks.forEach((t, idx) => {
           tracks.push({
             index: idx,
-            language: t.label || t.language || `Subtitle ${idx + 1}`
+            language: t.label || t.language || `Subtitle ${idx + 1}`,
+            active: t.mode === 'showing'
           });
         });
-        tracks.unshift({ index: -1, language: 'Off' });
+        const isOff = !tracks.some(t => t.active);
+        tracks.unshift({ index: -1, language: 'Off', active: isOff });
         return tracks;
       } catch (e) { return []; }
     }

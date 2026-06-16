@@ -195,8 +195,8 @@ const App = () => {
       );
       const isCollectionFolder = !fromCollection && isMovie && (
         item.type === 'folder' ||
-        (parseInt(item.has_files) === 0 && !hasPlayableCmd) ||
-        (String(item.is_series) === '1' && parseInt(item.has_files) > 1)
+        String(item.is_series) === '1' ||
+        (parseInt(item.has_files) === 0 && !hasPlayableCmd)
       );
       if (isCollectionFolder) {
          setActiveCollection(item);

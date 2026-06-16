@@ -61,6 +61,7 @@ server_reconstructed.js
 # Data files (usually runtime or large)
 channels.json
 tamil_channels.json
+search_index*.json
 
 # Audit reports
 *_audit_report.md

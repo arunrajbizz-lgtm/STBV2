@@ -674,8 +674,20 @@ const Player = ({
                </h2>
                <div className="flex flex-col gap-3">
                   {(menuMode === 'audio' ? audioTracks : subtitleTracks).length > 0 ? (menuMode === 'audio' ? audioTracks : subtitleTracks).map((entry, index) => (
-                    <div key={index} className={clsx("p-6 rounded-2xl font-bold text-xl transition-all border-2", focusedMenuIdx === index ? "bg-white text-black border-white scale-105 shadow-focus" : "bg-white/5 text-white/40 border-transparent")}>
-                       {entry.language || (menuMode === 'audio' ? `Audio Track ${index + 1}` : `Subtitle ${index + 1}`)}
+                    <div 
+                      key={index} 
+                      className={clsx(
+                        "p-6 rounded-2xl font-bold text-xl transition-all border-2 flex items-center justify-between", 
+                        focusedMenuIdx === index ? "bg-white text-black border-white scale-105 shadow-focus" : 
+                        entry.active ? "bg-accent/20 text-accent border-accent/40" : "bg-white/5 text-white/40 border-transparent"
+                      )}
+                    >
+                       <span className="truncate flex-1">
+                          {entry.language || (menuMode === 'audio' ? `Audio Track ${index + 1}` : `Subtitle ${index + 1}`)}
+                       </span>
+                       {entry.active && (
+                          <div className={clsx("w-3 h-3 rounded-full", focusedMenuIdx === index ? "bg-black" : "bg-accent")} />
+                       )}
                     </div>
                   )) : <div className="text-white/20 text-xl font-bold text-center py-6">None available</div>}
                </div>
